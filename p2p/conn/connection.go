@@ -86,11 +86,15 @@ type MConnection struct {
 	errored     uint32
 	config      *MConnConfig
 
-	quit         chan struct{}
-	flushTimer   *cmn.ThrottleTimer // flush writes as necessary but throttled.
-	pingTimer    *cmn.RepeatTimer   // send pings periodically
-	pongTimer    *time.Timer        // close conn if pong is not received in pongTimeout
-	chStatsTimer *cmn.RepeatTimer   // update channel stats periodically
+	quit       chan struct{}
+	flushTimer *cmn.ThrottleTimer // flush writes as necessary but throttled.
+	pingTimer  *cmn.RepeatTimer   // send pings periodically
+
+	// close conn if pong is not received in pongTimeout
+	pongTimer     *time.Timer
+	pongTimeoutCh chan struct{}
+
+	chStatsTimer *cmn.RepeatTimer // update channel stats periodically
 
 	created time.Time // time of creation
 }
@@ -190,10 +194,7 @@ func (c *MConnection) OnStart() error {
 	c.quit = make(chan struct{})
 	c.flushTimer = cmn.NewThrottleTimer("flush", c.config.FlushThrottle)
 	c.pingTimer = cmn.NewRepeatTimer("ping", c.config.PingInterval)
-	c.pongTimer = time.NewTimer(c.config.PongTimeout)
-	// we start timer once we've send ping; needed here because we use start
-	// listening in recvRoutine
-	_ = c.pongTimer.Stop()
+	c.pongTimeoutCh = make(chan struct{})
 	c.chStatsTimer = cmn.NewRepeatTimer("chStats", updateStats)
 	go c.sendRoutine()
 	go c.recvRoutine()
@@ -203,13 +204,12 @@ func (c *MConnection) OnStart() error {
 // OnStop implements BaseService
 func (c *MConnection) OnStop() {
 	c.BaseService.OnStop()
-	c.flushTimer.Stop()
-	c.pingTimer.Stop()
-	_ = c.pongTimer.Stop()
-	c.chStatsTimer.Stop()
 	if c.quit != nil {
 		close(c.quit)
 	}
+	c.flushTimer.Stop()
+	c.pingTimer.Stop()
+	c.chStatsTimer.Stop()
 	c.conn.Close() // nolint: errcheck
 	// We can't close pong safely here because
 	// recvRoutine may write to it after we've stopped.
@@ -340,12 +340,13 @@ FOR_LOOP:
 			c.Logger.Debug("Send Ping")
 			legacy.WriteOctet(packetTypePing, c.bufWriter, &n, &err)
 			c.sendMonitor.Update(int(n))
+			c.Logger.Debug("Starting pong timer", "dur", c.config.PongTimeout)
+			c.pongTimer = time.AfterFunc(c.config.PongTimeout, func() {
+				c.pongTimeoutCh <- struct{}{}
+			})
 			c.flush()
-			c.Logger.Debug("Starting pong timer")
-			c.pongTimer.Reset(c.config.PongTimeout)
-		case <-c.pongTimer.C:
+		case <-c.pongTimeoutCh:
 			c.Logger.Debug("Pong timeout")
-			// XXX: should we decrease peer score instead of closing connection?
 			err = errors.New("pong timeout")
 		case <-c.pong:
 			c.Logger.Debug("Send Pong")
@@ -353,6 +354,9 @@ FOR_LOOP:
 			c.sendMonitor.Update(int(n))
 			c.flush()
 		case <-c.quit:
+			if c.pongTimer != nil {
+				_ = c.pongTimer.Stop()
+			}
 			break FOR_LOOP
 		case <-c.send:
 			// Send some msgPackets
@@ -481,8 +485,8 @@ FOR_LOOP:
 			c.pong <- struct{}{}
 		case packetTypePong:
 			c.Logger.Debug("Receive Pong")
-			if !c.pongTimer.Stop() {
-				<-c.pongTimer.C
+			if c.pongTimer != nil {
+				_ = c.pongTimer.Stop()
 			}
 		case packetTypeMsg:
 			pkt, n, err := msgPacket{}, int(0), error(nil)
