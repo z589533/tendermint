@@ -1,5 +1,5 @@
-hash: 9399a10e80d255104f8ec07b5d495c41d8a3f7a421f9da97ebd78c65189f381d
-updated: 2018-01-18T23:11:10.703734578-05:00
+hash: d653c37b0fde4220158dcb61dcbe54501b951b26f0a5b6bd345b3f809ac3b1d0
+updated: 2018-01-30T07:56:33.571668021Z
 imports:
 - name: github.com/btcsuite/btcd
   version: 2e60448ffcc6bf78332d1fe590260095f554dd78
@@ -216,3 +216,5 @@ testImports:
   subpackages:
   - assert
   - require
+- name: github.com/fortytw2/leaktest
+  version: 3b724c3d7b8729a35bf4e577f71653aec6e53513
